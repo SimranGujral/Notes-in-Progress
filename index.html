@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Designing an On-Call Service</title>
+        <link rel="stylesheet" href="indexStyle.css">
+    </head>
+    <body>
+        <div class="page-layout">
+            <nav class="sidebar" aria-label="Page navigation">
+                <img class="sidebar-cat" src="assets/cat.jpg" alt="A cat looking at the camera">
+                <a class="sidebar-title" href="#top">On-call system</a>
+                <span class="sidebar-label">IN THIS ARTICLE</span>
+                <a class="sidebar-link" href="#functionalreqs">Functional Requirements</a>
+                <a class="sidebar-link" href="#nonfunctionalreqs">Non-Functional Requirements</a>
+                <div class="sidebar-subnav">
+                    <a class="sidebar-link" href="#availability">Availability</a>
+                    <a class="sidebar-link" href="#consistency">Consistency</a>
+                    <a class="sidebar-link" href="#read-write-ratio">Read/Write Ratio</a>
+                    <a class="sidebar-link" href="#scale">Scale</a>
+                </div>
+                <a class="sidebar-link" href="#core-entities">Core Entities</a>
+                <a class="sidebar-link" href="#data-model">Data Model</a>
+                <a class="sidebar-link" href="#scheduling-system">Scheduling System</a>
+                <a class="sidebar-link" href="#escalation-system">Escalation System</a>
+                <a class="sidebar-link" href="#reliability">Reliability Considerations</a>
+            </nav>
+            <main id="top">
+                <header>
+                    <h1>Designing an On-Call Service</h1>
+                </header>
+
+                <section id="functionalreqs">
+                    <h2>Functional Requirements</h2>
+                    <ul>
+                        <li>The system should create on-call schedules for an organization's services.</li>
+                        <li>The system should define an escalation matrix during a CSO.</li>
+                        <li>The system should notify service owners according to the escalation matrix and progress through escalation layers when needed.</li>
+                    </ul>
+                </section>
+
+                <section id="nonfunctionalreqs">
+                    <h2>Non-Functional Requirements</h2>
+
+                    <h3 id="availability">Availability</h3>
+                    <p>The scheduling service runs in the control plane. Scheduling work can be deferred during an outage, so the service can target 99.9% availability (about 8 hours and 46 minutes of downtime per year, or roughly 44 minutes per month).</p>
+                    <p>The escalation engine needs higher availability because service owners must be notified quickly during an outage. It should target at least 99.99% availability (a maximum of about 53 minutes of downtime per year, or roughly 4.4 minutes per month).</p>
+                    <p>The scheduling service produces an artifact used by the escalation engine. <b>Replicate this artifact so it remains available to the escalation engine even when the scheduling service is down.</b></p>
+
+                    <h3 id="consistency">Consistency</h3>
+                    <p>Updates to the same service and shift must be applied sequentially when multiple people edit concurrently. No shift should be left unmanned, so schedule writes require strong consistency.</p>
+                    <p>Updates to read replicas can be asynchronous and eventually consistent, allowing the escalation engine to read a stable schedule snapshot while a schedule is being updated.</p>
+
+                    <h3 id="read-write-ratio">Read/Write Ratio</h3>
+                    <p><b>Scheduling service:</b> Assume each service has one schedule artifact that is created or refreshed once every three months, and experiences about one incident per month. This gives approximately four schedule writes and at least 12 incident-triggered reads per service per year, excluding UI loads and edits, or a baseline of about <b>3:1 reads to schedule writes</b>. For capacity planning, use an estimated overall read-to-write ratio of <b>100:1</b> to account for additional reads such as UI loads and edits; validate it against expected traffic and incident-processing behavior.</p>
+                    <p><b>Escalation engine:</b> The escalation engine uses the schedule artifact produced by the scheduling engine. During an incident:</p>
+                    <ul>
+                        <li>An incident record is created.</li>
+                        <li>The escalation matrix is fetched for each impacted service; a single incident may affect multiple services resulting in a fan out per incident.</li>
+                        <li>A record is created for each affected service, either a single record with information about each escalation layer or multiple records. If layers are stored in multiple records in the scheduling artifact it might make sense to do a fetch only if the current layer  does not acknowledge a notification. The acknowledgement status is updated at each layer.</li>
+                    </ul>
+                    <p>Based on these assumptions, the read-to-write ratio is approximately <b>1:1</b>.</p>
+
+                    <h3 id="scale">Scale</h3>
+                    <p>Assume 100 organizations with 1,000 services each: 100,000 services requiring rosters. If roster creation happens every three months, the expected scheduling and incident workloads are:</p>
+                    <h4>Schedule creation</h4>
+                    <ul>
+                        <li>100,000 roster requests every three months.</li>
+                        <li>For each three-month schedule refresh, assuming 3 layers, 2 shifts per layer, and about 100 days of coverage, each request produces about 600 writes.</li>
+                        <li><code>600 × 100,000 ÷ 3 ≈ 20 million writes per month</code>, or about 6 writes per second on average.</li>
+                    </ul>
+                    <p><b>Average write throughput can obscure the peak load. If all 100,000 service schedules are refreshed at the start of a quarter, and each refresh generates approximately 600 schedule-entry writes, the system must process up to 60 million writes during that refresh. The scheduling pipeline should accept refresh requests through a queue and process them at a controlled rate, with capacity sized to the required completion window. Publish each completed schedule artifact atomically so the escalation engine never reads a partially generated schedule.</b></section><p>
+
+                    <h4>Incident processing</h4>
+                    <p>Assume 100,000 incidents per month. For a high-impact incident affecting up to 100 services, the estimate per incident is:</p>
+                    <ul>
+                        <li>About 1 write for affected-service records.</li>
+                        <li>For every service, it would have a maximum of 3 fetches for escalation data.</li>
+                        <li>For every service, it would have a maximum of 3 writes for writing the escalation data.</li>
+                        <li>For every service, it would have a maximum of 3 acknowledgement and polling updates.</li>
+                        <li>For every service about 3 transactional outbox writes for three layers</li>
+                    </ul>
+                    <p>This is approximately 1,300 database operations per incident. At 100,000 incidents per month, that is around 100 million operations per month, or roughly 50 operations per second on average.</p>
+                    <p><b>A broad cloud-provider outage could affect many services across many tenants at once. Consider tenant-based partitioning, tenant-service keys to ease search for on calls during an outage of a wider scale.</b></p>
+                </section>
+
+                <section id="core-entities">
+                    <h2>Core Entities</h2>
+                    <ul>
+                        <li>Services</li>
+                        <li>Users</li>
+                        <li>Escalation layers</li>
+                        <li>Shifts</li>
+                        <li>Schedules</li>
+                        <li>CSOs and affected services</li>
+                    </ul>
+                    <h3>Relationships</h3>
+                    <ul>
+                        <li>A service has many escalation layers.</li>
+                        <li>An escalation layer has many users and many shifts.</li>
+                        <li>A user is assigned to a shift; a shift has schedule entries.</li>
+                        <li>A CSO can affect multiple services.</li>
+                    </ul>
+                    <p>For example, a billing service might have primary, secondary, and tertiary escalation layers. The primary and secondary layers could each have two shifts, while the tertiary layer has one. A shift groups people into a particular rotation; schedule entries specify who is on call during a particular time interval.</p>
+                </section>
+
+                <section id="data-model">
+                    <h2>Data Model</h2>
+                    <h3>Schedule record</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Field</th>
+                                    <th>Purpose</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>Service ID</td><td>Service the schedule belongs to</td></tr>
+                                <tr><td>Layer ID</td><td>Escalation layer for this assignment</td></tr>
+                                <tr><td>Shift ID</td><td>Shift rotation for this assignment</td></tr>
+                                <tr><td>Start and end date/time</td><td>Time interval covered by the assignment</td></tr>
+                                <tr><td>In-charge</td><td>Assigned on-call user; required and not null</td></tr>
+                                <tr><td>Partial-shift exceptions</td><td>Optional start/end intervals and replacement assignees</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h3>Scheduling tables</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Table</th>
+                                    <th>Key fields</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>Services</td><td>Service ID (PK), service name, number of layers</td></tr>
+                                <tr><td>Layers</td><td>Layer ID (PK), service ID (FK), number of shifts, rotation length</td></tr>
+                                <tr><td>Shifts</td><td>Shift ID (PK), layer ID (FK), team members, start time, end time</td></tr>
+                                <tr><td>Rotations</td><td>Service ID, layer ID, shift ID, people</td></tr>
+                                <tr><td>Schedules</td><td>Service ID, layer ID, shift ID, start/end time, date, in-charge, exceptions</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h3>Incident tables</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Table</th>
+                                    <th>Key fields</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>CSOs</td><td>CSO ID, affected services, state (active or resolved)</td></tr>
+                                <tr><td>Ongoing CSOs</td><td>CSO ID, service ID, state, escalation layer, notification status, attempts, acknowledgement status, current/last-layer flags, next contact time</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>The ongoing-CSO data can be represented as a CSO record plus one affected-service record per service. Each affected-service record tracks the current layer, acknowledgement state, notification start time, next escalation time, attempt count, and whether it is the last layer.</p>
+                </section>
+
+                <section id="scheduling-system">
+                    <h2>Scheduling System</h2>
+                    <ol>
+                        <li>Configure each service's layers, shifts, shift times, and time between escalations.</li>
+                        <li>Set the schedule calendar length to three months and regenerate or refresh the schedule every three months.</li>
+                        <li>Calculate the number of rotations from the calendar length and rotation length.</li>
+                        <li>For each layer and shift, assign team members in rotation order and create schedule entries for each rotation.</li>
+                        <li>Store each entry with its layer, shift, on-call assignee, and start/end interval.</li>
+                    </ol>
+                    <p>Schedule creation produces the artifact consumed by the escalation engine. Replicas of this artifact should remain readable if the scheduling service becomes unavailable.</p>
+                </section>
+
+                <section id="escalation-system">
+                    <h2>Escalation System</h2>
+                    <ol>
+                        <li>When a CSO is triggered, create an active CSO record and list the affected services.</li>
+                        <li>Create an affected-service record at the first escalation layer for each impacted service.</li>
+                        <li>Send a notification event for the first layer, then record the notification start time and increment the attempt count.</li>
+                        <li>Run a scheduler every minute. If the current layer has not been acknowledged and its escalation time has been reached, create a record for the next layer, mark the previous layer as no longer current, and notify the new layer.</li>
+                        <li>Continue through the layers. At the final layer, retry according to policy or route the incident for manual intervention.</li>
+                    </ol>
+                    <p>Fetch on-call snapshots for each affected service and layer, including the on-call owner and shift end time, so the escalation engine can continue without depending on live scheduling-service availability.</p>
+                </section>
+
+                <section id="reliability">
+                    <h2>Reliability Considerations</h2>
+                    <h3>Atomicity</h3>
+                    <p>Notification publishing and updating the corresponding layer record must stay consistent. Use a transactional outbox so the notification event and its state change can be reliably coordinated and retried.</p>
+                    <h3>Idempotency</h3>
+                    <p>Notification publishing must be safe to retry. Repeated requests with the same idempotency key should return the existing notification ID rather than creating duplicate notifications.</p>
+                </section>
+            </main>
+        </div>
+        <footer></footer>
+    </body>
+</html>
