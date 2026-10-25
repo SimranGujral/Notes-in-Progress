@@ -13,18 +13,20 @@
                 <a class="sidebar-title" href="#top">On-call system</a>
                 <span class="sidebar-label">IN THIS ARTICLE</span>
                 <a class="sidebar-link" href="#functionalreqs">Functional Requirements</a>
+                <a class="sidebar-link" href="#schedule-generation-workflow">Schedule Generation Workflow</a>
+                <a class="sidebar-link" href="#schedule-generation-entities">Schedule Generation Core Entities</a>
+                <a class="sidebar-link" href="#escalation-service">Escalation Service</a>
+                <a class="sidebar-link" href="#escalation-entities">Escalation Core Entities</a>
                 <a class="sidebar-link" href="#nonfunctionalreqs">Non-Functional Requirements</a>
                 <div class="sidebar-subnav">
                     <a class="sidebar-link" href="#availability">Availability</a>
                     <a class="sidebar-link" href="#consistency">Consistency</a>
+                    <a class="sidebar-link" href="#resource-contention">Resource Contention</a>
                     <a class="sidebar-link" href="#read-write-ratio">Read/Write Ratio</a>
                     <a class="sidebar-link" href="#scale">Scale</a>
+                    <a class="sidebar-link" href="#reliability">Reliability Considerations</a>
                 </div>
-                <a class="sidebar-link" href="#core-entities">Core Entities</a>
-                <a class="sidebar-link" href="#data-model">Data Model</a>
-                <a class="sidebar-link" href="#scheduling-system">Scheduling System</a>
-                <a class="sidebar-link" href="#escalation-system">Escalation System</a>
-                <a class="sidebar-link" href="#reliability">Reliability Considerations</a>
+                <a class="sidebar-link" href="#combined-workflow">End-to-End Workflow</a>
             </nav>
             <main id="top">
                 <header>
@@ -35,9 +37,249 @@
                     <h2>Functional Requirements</h2>
                     <ul>
                         <li>The system should create on-call schedules for an organization's services.</li>
-                        <li>The system should define an escalation matrix during a CSO.</li>
+                        <li>The system should define an escalation matrix for each service.</li>
                         <li>The system should notify service owners according to the escalation matrix and progress through escalation layers when needed.</li>
                     </ul>
+                </section>
+
+                <section id="schedule-generation-workflow">
+                    <h2>Schedule Generation Workflow</h2>
+                    <ol>
+                        <li><strong>Save the schedule rules.</strong> When a user sets up or changes a service's schedule, save the rules and a due outbox event together in one database transaction. Give the rules a version so the event uses the right version later.</li>
+                        <li><strong>Publish due work.</strong> A worker claims a due outbox row with a lease so another worker does not process it at the same time, then publishes its event to the schedule queue. Mark it published after the queue confirms receipt. If the worker fails before marking it, it may publish the event again.</li>
+                        <li><strong>Expect retries.</strong> The same event may arrive more than once, so the consumer uses its stable event ID to recognize duplicates.</li>
+                        <li><strong>Build the roster.</strong> The consumer loads the rules version named in the event and works out who is on call for each layer and shift during the requested period.</li>
+                        <li><strong>Save everything together.</strong> In one database transaction, save all roster rows, record the event as processed, mark the schedule event complete, and add the next run to the outbox. Enforce a unique processed-event ID so retries cannot create a duplicate roster.</li>
+                        <li><strong>Confirm success.</strong> Acknowledge the queue message only after the transaction commits. If saving fails, roll back and retry. If the event was already processed, make no changes and acknowledge the duplicate.</li>
+                    </ol>
+                    <p>The database transaction protects the roster and related records. Queue publication happens outside that transaction, so the outbox and idempotent consumer handle retries across the database and queue.</p>
+                    <figure class="workflow-diagram">
+                        <figcaption>Schedule generation at a glance</figcaption>
+                        <ol class="workflow-flow" aria-label="Schedule generation flow">
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M13 6h15l8 8v27H13z"></path>
+                                    <path d="M28 6v9h8M19 22h11M19 28h11M19 34h7"></path>
+                                    <path d="m31 34 7-7 3 3-7 7-4 1z"></path>
+                                </svg>
+                                <span>Save schedule rules and outbox event together</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <circle cx="18" cy="15" r="6"></circle>
+                                    <path d="M7 37c1-8 5-12 11-12s10 4 11 12M31 10v11h10"></path>
+                                    <circle cx="35" cy="16" r="10"></circle>
+                                    <path d="M35 11v5l3 2"></path>
+                                </svg>
+                                <span>Worker claims and publishes due work</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M7 25h34l-4 14H11zM12 25l5-12h14l5 12"></path>
+                                    <path d="M24 5v18m-6-6 6 6 6-6"></path>
+                                    <path d="M17 32h14"></path>
+                                </svg>
+                                <span>Consumer checks the event ID and ignores duplicates</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <rect x="8" y="10" width="32" height="30" rx="3"></rect>
+                                    <path d="M8 19h32M16 7v7m16-7v7M15 25h5m8 0h5M15 32h5m8 0h5"></path>
+                                    <circle cx="36" cy="36" r="8"></circle>
+                                    <path d="m32.5 36 2.3 2.3 4.7-5"></path>
+                                </svg>
+                                <span>Load the right rules version and build the roster</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M8 12c0-3 7-5 16-5s16 2 16 5-7 5-16 5-16-2-16-5z"></path>
+                                    <path d="M8 12v9c0 3 7 5 16 5 2 0 4-.1 6-.4M8 21v9c0 3 7 5 16 5"></path>
+                                    <circle cx="35" cy="34" r="9"></circle>
+                                    <path d="m31 34 3 3 5-6"></path>
+                                </svg>
+                                <span><strong>Save together:</strong> roster + processed event + completion + next outbox event</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M7 12h34v24H7z"></path>
+                                    <path d="m8 14 16 13 16-13"></path>
+                                    <circle cx="35" cy="34" r="9"></circle>
+                                    <path d="m31 34 3 3 5-6"></path>
+                                </svg>
+                                <span>Acknowledge the message after saving succeeds</span>
+                            </li>
+                        </ol>
+                        <aside class="info-callout workflow-retry" role="note">
+                            <strong class="info-callout-title">Retry and duplicate delivery</strong>
+                            <p>If saving fails, roll back and retry. If the event ID was already processed, skip the duplicate and acknowledge it.</p>
+                        </aside>
+                    </figure>
+                </section>
+
+                <section id="schedule-generation-entities">
+                    <h2>Schedule Generation Core Entities</h2>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Entity</th>
+                                    <th>Fields</th>
+                                    <th>Purpose</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>ScheduleRules</td>
+                                    <td><code>service_id</code> (PK), <code>version</code> (PK), <code>no_of_layers</code>, <code>no_of_shifts</code>, <code>team_members</code>, <code>duration_days</code>, <code>layer_shift_rules</code> (rotation length and shift times)</td>
+                                    <td>Stores a service's schedule rules. Use <code>(service_id, version)</code> as a composite key so past events can load the exact rules version.</td>
+                                </tr>
+                                <tr>
+                                    <td>PublishSchedule</td>
+                                    <td><code>event_id</code> (PK), <code>service_id</code>, <code>rules_version</code>, <code>scheduled_for</code>, <code>status</code>, <code>lease_expires_at</code>, <code>published_at</code></td>
+                                    <td>Acts as the transactional outbox. <code>(service_id, rules_version)</code> references ScheduleRules. Status moves through <code>pending</code>, <code>claimed</code>, <code>published</code>, and <code>completed</code>; an expired claim can be retried.</td>
+                                </tr>
+                                <tr>
+                                    <td>ConsumerEvent</td>
+                                    <td><code>event_id</code> (PK), <code>processed_at</code></td>
+                                    <td>Records each successfully processed event. A unique event ID prevents duplicate deliveries from generating the roster again.</td>
+                                </tr>
+                                <tr>
+                                    <td>Roster</td>
+                                    <td><code>service_id</code>, <code>layer</code>, <code>shift_id</code>, <code>on_call</code>, <code>start_datetime</code>, <code>end_datetime</code></td>
+                                    <td>Stores who is on call for each service, layer, shift, and time period. Enforce uniqueness for the service, layer, shift, and start time.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section id="escalation-service">
+                    <h2>Escalation Service Workflow</h2>
+                    <ol>
+                        <li><strong>Create the incident.</strong> In one database transaction, save the incident, one impacted-service row for each affected service, and a layer 1 event in the outbox. Keep one impacted-service row per <code>(incident_id, service_id)</code>.</li>
+                        <li><strong>Publish due work.</strong> An outbox worker claims due events with a lease, publishes them to the queue, and marks them published after the queue confirms receipt. If it fails before recording publication, the same event may be published again, so each event needs a stable ID.</li>
+                        <li><strong>Find the on-call person.</strong> The consumer ignores event IDs it has already processed. It looks up the person for that service and layer in the roster, then—in one transaction—creates a notification row, updates the impacted-service row with the current layer and notification, marks the outbox event complete, and records the event as processed. Use a unique key for <code>(impacted_service_id, layer, attempt)</code>.</li>
+                        <li><strong>Send the notification.</strong> A dispatcher sends pending notification rows to the external notification system using the notification ID as an idempotency key, if the provider supports it. After confirmation, it records the notification as published, sets the impacted service to <code>waiting_for_ack</code>, and adds a delayed escalation event to the outbox in one database transaction. Keep delivery state (<code>pending</code> or <code>published</code>) separate from acknowledgement state (<code>pending</code>, <code>acknowledged</code>, or <code>no_ack</code>).</li>
+                        <li><strong>Wait, then decide whether to escalate.</strong> When the delayed event is due, check that it still refers to the current notification. In one transaction, record the event as processed and mark its outbox row complete. If the notification was acknowledged, mark the impacted-service row complete. Otherwise, mark the notification <code>no_ack</code> and move to the next layer. If another layer remains, add its event to the outbox in the same transaction.</li>
+                        <li><strong>Record acknowledgements.</strong> The external system sends an acknowledgement for a notification ID. Save it to that notification row. Update the impacted-service row only if that notification is still current. Use a conditional update or row lock so an acknowledgement and timeout cannot advance the same service at the same time.</li>
+                        <li><strong>Handle the final layer.</strong> If nobody acknowledges the last layer, stop advancing and follow the configured policy, such as retrying, notifying a fallback team, or asking for manual intervention.</li>
+                    </ol>
+                    <figure class="workflow-diagram">
+                        <figcaption>Escalation at a glance</figcaption>
+                        <ol class="workflow-flow" aria-label="Escalation service flow">
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M13 6h20l6 6v30H13zM33 6v8h6"></path>
+                                    <path d="M19 21h14M19 27h14M19 33h7"></path>
+                                    <circle cx="10" cy="14" r="6"></circle>
+                                    <path d="M7 14h6M10 11v6"></path>
+                                </svg>
+                                <span>Create incident, impacted-service rows, and first outbox event in one transaction</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <circle cx="18" cy="15" r="6"></circle>
+                                    <path d="M7 37c1-8 5-12 11-12s10 4 11 12"></path>
+                                    <circle cx="35" cy="16" r="10"></circle>
+                                    <path d="M35 11v5l4 2M31 34h10M36 29v10"></path>
+                                </svg>
+                                <span>Worker claims due event and publishes it to the queue</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M7 25h34l-4 14H11zM12 25l5-12h14l5 12"></path>
+                                    <path d="M24 5v18m-6-6 6 6 6-6"></path>
+                                    <path d="M17 32h14"></path>
+                                </svg>
+                                <span>Consumer checks event ID and looks up on-call person in the roster</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M8 12c0-3 7-5 16-5s16 2 16 5-7 5-16 5-16-2-16-5z"></path>
+                                    <path d="M8 12v9c0 3 7 5 16 5"></path>
+                                    <circle cx="34" cy="33" r="10"></circle>
+                                    <path d="M30 33h8m-4-4v8"></path>
+                                    <path d="M8 21v9c0 3 7 5 16 5"></path>
+                                </svg>
+                                <span>Save notification row, current layer, and processed event together</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <path d="M7 13h25v20H7zM8 15l12 10 12-10"></path>
+                                    <path d="M35 21a9 9 0 1 1-5 9M35 16v6h-6"></path>
+                                </svg>
+                                <span>Dispatcher sends notification, then schedules a delayed check</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <rect x="7" y="8" width="34" height="32" rx="3"></rect>
+                                    <path d="M14 17h20M14 24h10M14 31h8"></path>
+                                    <circle cx="33" cy="31" r="7"></circle>
+                                    <path d="m30 31 2 2 4-5"></path>
+                                </svg>
+                                <span>Record acknowledgement on its notification ID</span>
+                            </li>
+                            <li>
+                                <svg class="workflow-doodle" viewBox="0 0 48 48" aria-hidden="true">
+                                    <circle cx="24" cy="24" r="17"></circle>
+                                    <path d="M24 14v11l8 5M7 8v10h10"></path>
+                                    <path d="M7 18a19 19 0 0 1 34 2"></path>
+                                </svg>
+                                <span>At the deadline, stop if acknowledged; otherwise advance or apply final-layer policy</span>
+                            </li>
+                        </ol>
+                        <aside class="info-callout workflow-retry" role="note">
+                            <strong class="info-callout-title">Retries and duplicate events</strong>
+                            <p>Use stable event and notification IDs. Commit database updates and processed-event records together; make queue and provider retries idempotent. A late acknowledgement updates only its matching notification.</p>
+                        </aside>
+                    </figure>
+                    <aside class="info-callout" role="note">
+                        <strong class="info-callout-title">Transaction boundary</strong>
+                        <p>Assume the outbox, state tables, and processed-event table share a transactional database. Database changes commit together; queue and external-provider calls happen outside those transactions, so stable IDs and idempotent retries are needed.</p>
+                    </aside>
+                </section>
+
+                <section id="escalation-entities">
+                    <h2>Escalation Core Entities</h2>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Entity</th>
+                                    <th>Fields</th>
+                                    <th>Purpose</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Incident</td>
+                                    <td><code>incident_id</code> (PK), <code>created_at</code>, <code>status</code></td>
+                                    <td>Stores one row per incident.</td>
+                                </tr>
+                                <tr>
+                                    <td>ImpactedService</td>
+                                    <td><code>impacted_service_id</code> (PK), <code>incident_id</code> (FK), <code>service_id</code>, <code>current_layer</code>, <code>status</code>, <code>next_escalation_at</code>, <code>current_notification_id</code></td>
+                                    <td>Stores one row per incident and service. Enforce uniqueness on <code>(incident_id, service_id)</code>. Status can be <code>pending</code>, <code>waiting_for_ack</code>, <code>complete</code>, or <code>exhausted</code>.</td>
+                                </tr>
+                                <tr>
+                                    <td>ServiceNotification</td>
+                                    <td><code>notification_id</code> (PK), <code>impacted_service_id</code> (FK), <code>layer</code>, <code>attempt</code>, <code>on_call</code>, <code>delivery_status</code>, <code>acknowledgement_status</code>, <code>published_at</code>, <code>ack_deadline</code>, <code>acknowledged_at</code></td>
+                                    <td>Stores one row per layer and attempt. Enforce uniqueness on <code>(impacted_service_id, layer, attempt)</code>. Delivery status is <code>pending</code>/<code>published</code>; acknowledgement status is <code>pending</code>/<code>acknowledged</code>/<code>no_ack</code>.</td>
+                                </tr>
+                                <tr>
+                                    <td>EscalationOutbox</td>
+                                    <td><code>event_id</code> (PK), <code>impacted_service_id</code> (FK), <code>notification_id</code>, <code>event_type</code>, <code>available_at</code>, <code>status</code>, <code>lease_expires_at</code>, <code>published_at</code></td>
+                                    <td>Stores immediate and delayed events to publish. Track <code>pending</code>, <code>claimed</code>, <code>published</code>, and <code>completed</code>; retry claims after their lease expires.</td>
+                                </tr>
+                                <tr>
+                                    <td>ProcessedEvent</td>
+                                    <td><code>event_id</code> (PK), <code>processed_at</code>, <code>event_type</code></td>
+                                    <td>Stores each successfully handled event ID once so retries or duplicate deliveries do not repeat its database changes.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>Create the incident, its impacted-service rows, and the first outbox events in one transaction. For each consumed event, commit its database changes and processed-event row together. Queue and notification-provider calls happen outside database transactions.</p>
                 </section>
 
                 <section id="nonfunctionalreqs">
@@ -51,150 +293,86 @@
                     <h3 id="consistency">Consistency</h3>
                     <p>Updates to the same service and shift must be applied sequentially when multiple people edit concurrently. No shift should be left unmanned, so schedule writes require strong consistency.</p>
                     <p>Updates to read replicas can be asynchronous and eventually consistent, allowing the escalation engine to read a stable schedule snapshot while a schedule is being updated.</p>
+                    <h4 id="resource-contention">Resource Contention</h4>
+                    <p>When multiple users edit the same service schedule concurrently, the system must ensure that updates are applied sequentially. Use a versioning mechanism to prevent concurrent writes from causing conflicts or leaving shifts unmanned.</p>
 
                     <h3 id="read-write-ratio">Read/Write Ratio</h3>
-                    <p><b>Scheduling service:</b> Assume each service has one schedule artifact that is created or refreshed once every three months, and experiences about one incident per month. This gives approximately four schedule writes and at least 12 incident-triggered reads per service per year, excluding UI loads and edits, or a baseline of about <b>3:1 reads to schedule writes</b>. For capacity planning, use an estimated overall read-to-write ratio of <b>100:1</b> to account for additional reads such as UI loads and edits; validate it against expected traffic and incident-processing behavior.</p>
-                    <p><b>Escalation engine:</b> The escalation engine uses the schedule artifact produced by the scheduling engine. During an incident:</p>
-                    <ul>
-                        <li>An incident record is created.</li>
-                        <li>The escalation matrix is fetched for each impacted service; a single incident may affect multiple services resulting in a fan out per incident.</li>
-                        <li>A record is created for each affected service, either a single record with information about each escalation layer or multiple records. If layers are stored in multiple records in the scheduling artifact it might make sense to do a fetch only if the current layer  does not acknowledge a notification. The acknowledgement status is updated at each layer.</li>
-                    </ul>
-                    <p>Based on these assumptions, the read-to-write ratio is approximately <b>1:1</b>.</p>
+                    <p><b>Scheduling service:</b> For a simple logical-operation estimate, assume each service's roster is generated four times a year and looked up once for the initial layer during one incident each month. That is about 12 roster reads for 4 schedule generations, or a baseline <b>3:1 read-to-write ratio</b>. This counts each roster generation as one logical write, not the individual roster rows. Incidents that reach more layers add roster reads. UI loads, edits, and other reads are also excluded. Use <b>100:1</b> as a provisional overall planning estimate that includes expected UI reads and schedule edits; validate it against measured or expected traffic.</p>
+                    <p><b>Escalation service:</b> A single read-to-write ratio is not useful without specifying how many services an incident affects, how many layers are reached, and how many retries or acknowledgements occur. Estimate reads and writes per affected service and per layer, as in the scale example below.</p>
 
                     <h3 id="scale">Scale</h3>
                     <p>Assume 100 organizations with 1,000 services each: 100,000 services requiring rosters. If roster creation happens every three months, the expected scheduling and incident workloads are:</p>
                     <h4>Schedule creation</h4>
                     <ul>
                         <li>100,000 roster requests every three months.</li>
-                        <li>For each three-month schedule refresh, assuming 3 layers, 2 shifts per layer, and about 100 days of coverage, each request produces about 600 writes.</li>
-                        <li><code>600 × 100,000 ÷ 3 ≈ 20 million writes per month</code>, or about 6 writes per second on average.</li>
+                        <li>For this estimate, assume 3 layers, 2 shifts per layer, about 100 days of coverage, and exactly one roster row per layer, shift, and day. This simplifies to about 600 roster rows per service refresh; partial shifts and different rotation lengths could change the count.</li>
+                        <li><code>600 × 100,000 ÷ 3 ≈ 20 million roster rows per month</code>, or about 7.7 writes per second averaged over a 30-day month.</li>
                     </ul>
-                    <p><b>Average write throughput can obscure the peak load. If all 100,000 service schedules are refreshed at the start of a quarter, and each refresh generates approximately 600 schedule-entry writes, the system must process up to 60 million writes during that refresh. The scheduling pipeline should accept refresh requests through a queue and process them at a controlled rate, with capacity sized to the required completion window. Publish each completed schedule artifact atomically so the escalation engine never reads a partially generated schedule.</b></section><p>
+                    <p><b>Average throughput can hide the peak. If all 100,000 services refresh at the start of a quarter, that is about 60 million roster rows in one refresh window. Queue the work and control its processing rate based on the required completion time. Publish each completed roster atomically so the escalation service never reads a partial schedule.</b></p>
 
                     <h4>Incident processing</h4>
-                    <p>Assume 100,000 incidents per month. For a high-impact incident affecting up to 100 services, the estimate per incident is:</p>
+                    <p>For a rough upper-load scenario, assume 100,000 incidents per month and that each incident affects 100 services and reaches all 3 layers. Per incident, estimate:</p>
                     <ul>
-                        <li>About 1 write for affected-service records.</li>
-                        <li>For every service, it would have a maximum of 3 fetches for escalation data.</li>
-                        <li>For every service, it would have a maximum of 3 writes for writing the escalation data.</li>
-                        <li>For every service, it would have a maximum of 3 acknowledgement and polling updates.</li>
-                        <li>For every service about 3 transactional outbox writes for three layers</li>
+                        <li>1 incident row, plus 1 impacted-service row for each of the 100 affected services.</li>
+                        <li>For each affected service: up to 3 roster reads, 3 notification-row writes, 3 acknowledgement/deadline updates, and 3 outbox-event writes (the initial event plus up to 2 delayed escalations).</li>
                     </ul>
-                    <p>This is approximately 1,300 database operations per incident. At 100,000 incidents per month, that is around 100 million operations per month, or roughly 50 operations per second on average.</p>
-                    <p><b>A broad cloud-provider outage could affect many services across many tenants at once. Consider tenant-based partitioning, tenant-service keys to ease search for on calls during an outage of a wider scale.</b></p>
+                    <p>This is about <b>1,301 database operations per incident</b> (1 + 100 × (1 + 3 + 3 + 3 + 3)). At 100,000 incidents per month, that is about <b>130 million operations per month</b>, or roughly <b>50 per second</b> averaged over a 30-day month. This is a simplified estimate: it excludes event-processing records, outbox dispatch updates, external provider calls, retries, and uneven traffic, so production capacity will need headroom.</p>
+                    <p><b>A broad cloud-provider outage could affect many services across many tenants at once. Consider tenant-based partitioning and tenant-service keys to make affected on-call data easier to find.</b></p>
+
+                    <h3 id="reliability">Reliability Considerations</h3>
+                    <h4>Atomicity</h4>
+                    <p>Save related database changes in one transaction. Use an outbox row in that same database transaction to record events that need publishing. The worker publishes the event afterward; the database and queue cannot commit as one transaction, so retries and idempotent consumers handle failures between those steps.</p>
+                    <h4>Idempotency</h4>
+                    <p>Give every event and notification a stable ID. If a message is delivered again, use that ID to detect it and avoid repeating the database changes. When sending notifications, pass the notification ID as the provider's idempotency key if the provider supports it. Without provider-side idempotency, a retry after an uncertain delivery may send a duplicate notification.</p>
+                    <p>Schedule-generation requests can arrive in bursts. Queue them and process them at a controlled rate. Use a stable event ID so a retried request cannot generate a second roster.</p>
                 </section>
 
-                <section id="core-entities">
-                    <h2>Core Entities</h2>
-                    <ul>
-                        <li>Services</li>
-                        <li>Users</li>
-                        <li>Escalation layers</li>
-                        <li>Shifts</li>
-                        <li>Schedules</li>
-                        <li>CSOs and affected services</li>
-                    </ul>
-                    <h3>Relationships</h3>
-                    <ul>
-                        <li>A service has many escalation layers.</li>
-                        <li>An escalation layer has many users and many shifts.</li>
-                        <li>A user is assigned to a shift; a shift has schedule entries.</li>
-                        <li>A CSO can affect multiple services.</li>
-                    </ul>
-                    <p>For example, a billing service might have primary, secondary, and tertiary escalation layers. The primary and secondary layers could each have two shifts, while the tertiary layer has one. A shift groups people into a particular rotation; schedule entries specify who is on call during a particular time interval.</p>
+                <section id="combined-workflow">
+                    <h2>End-to-End Workflow</h2>
+                    <p>Schedule generation runs ahead of time and produces the roster. The escalation service reads that roster when an incident occurs.</p>
+                    <figure class="workflow-diagram">
+                        <figcaption>How scheduling and escalation work together</figcaption>
+                        <div class="system-flow" role="group" aria-label="Schedule generation and escalation components">
+                            <div class="system-flow-lane">
+                                <h3>Schedule generation <span>(runs ahead of time and on refresh)</span></h3>
+                                <div class="system-flow-steps">
+                                    <div class="system-flow-step"><strong>User</strong><span>Sets schedule rules</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>submits rules</small></span>
+                                    <div class="system-flow-step"><strong>Scheduling service</strong><span>Saves versioned rules and an outbox event in one transaction</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>publishes due event</small></span>
+                                    <div class="system-flow-step"><strong>Outbox worker + queue</strong><span>Publishes due schedule work</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>delivers event</small></span>
+                                    <div class="system-flow-step"><strong>Schedule consumer</strong><span>Builds the roster and commits it with event status</span></div>
+                                </div>
+                            </div>
+                            <div class="roster-artifact" aria-label="Roster artifact shared between workflows">
+                                <span class="roster-artifact-label">Shared artifact</span>
+                                <strong>Roster</strong>
+                                <span>Service · layer · shift · on-call person · time period</span>
+                            </div>
+                            <div class="artifact-connector" aria-hidden="true"><span>Escalation reads the roster</span></div>
+                            <div class="system-flow-lane">
+                                <h3>Escalation <span>(starts when an incident occurs)</span></h3>
+                                <div class="system-flow-steps">
+                                    <div class="system-flow-step"><strong>Incident intake</strong><span>Saves incident, impacted services, and first outbox events</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>publishes outbox event</small></span>
+                                    <div class="system-flow-step"><strong>Outbox worker + queue</strong><span>Publishes service notification work</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>delivers event</small></span>
+                                    <div class="system-flow-step"><strong>Escalation consumer</strong><span>Looks up the on-call person in the roster and creates a notification row</span></div>
+                                    <span class="system-flow-arrow"><span aria-hidden="true">→</span><small>dispatches notification</small></span>
+                                    <div class="system-flow-step"><strong>Notification service</strong><span>Sends the notification and returns acknowledgement updates</span></div>
+                                </div>
+                                <p class="system-flow-loop">The notification service sends acknowledgement updates back to the escalation service. At the deadline, it stops if acknowledged; otherwise, it queues the next layer or applies the final-layer policy.</p>
+                            </div>
+                        </div>
+                        <aside class="info-callout workflow-retry" role="note">
+                            <strong class="info-callout-title">The connection between the workflows</strong>
+                            <p>The roster is generated independently of an incident and is the handoff between services. Keep completed rosters readable by escalation even if the scheduling service is temporarily unavailable.</p>
+                        </aside>
+                    </figure>
                 </section>
 
-                <section id="data-model">
-                    <h2>Data Model</h2>
-                    <h3>Schedule record</h3>
-                    <div class="table-scroll">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Field</th>
-                                    <th>Purpose</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><td>Service ID</td><td>Service the schedule belongs to</td></tr>
-                                <tr><td>Layer ID</td><td>Escalation layer for this assignment</td></tr>
-                                <tr><td>Shift ID</td><td>Shift rotation for this assignment</td></tr>
-                                <tr><td>Start and end date/time</td><td>Time interval covered by the assignment</td></tr>
-                                <tr><td>In-charge</td><td>Assigned on-call user; required and not null</td></tr>
-                                <tr><td>Partial-shift exceptions</td><td>Optional start/end intervals and replacement assignees</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
 
-                    <h3>Scheduling tables</h3>
-                    <div class="table-scroll">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Table</th>
-                                    <th>Key fields</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><td>Services</td><td>Service ID (PK), service name, number of layers</td></tr>
-                                <tr><td>Layers</td><td>Layer ID (PK), service ID (FK), number of shifts, rotation length</td></tr>
-                                <tr><td>Shifts</td><td>Shift ID (PK), layer ID (FK), team members, start time, end time</td></tr>
-                                <tr><td>Rotations</td><td>Service ID, layer ID, shift ID, people</td></tr>
-                                <tr><td>Schedules</td><td>Service ID, layer ID, shift ID, start/end time, date, in-charge, exceptions</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <h3>Incident tables</h3>
-                    <div class="table-scroll">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Table</th>
-                                    <th>Key fields</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><td>CSOs</td><td>CSO ID, affected services, state (active or resolved)</td></tr>
-                                <tr><td>Ongoing CSOs</td><td>CSO ID, service ID, state, escalation layer, notification status, attempts, acknowledgement status, current/last-layer flags, next contact time</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <p>The ongoing-CSO data can be represented as a CSO record plus one affected-service record per service. Each affected-service record tracks the current layer, acknowledgement state, notification start time, next escalation time, attempt count, and whether it is the last layer.</p>
-                </section>
-
-                <section id="scheduling-system">
-                    <h2>Scheduling System</h2>
-                    <ol>
-                        <li>Configure each service's layers, shifts, shift times, and time between escalations.</li>
-                        <li>Set the schedule calendar length to three months and regenerate or refresh the schedule every three months.</li>
-                        <li>Calculate the number of rotations from the calendar length and rotation length.</li>
-                        <li>For each layer and shift, assign team members in rotation order and create schedule entries for each rotation.</li>
-                        <li>Store each entry with its layer, shift, on-call assignee, and start/end interval.</li>
-                    </ol>
-                    <p>Schedule creation produces the artifact consumed by the escalation engine. Replicas of this artifact should remain readable if the scheduling service becomes unavailable.</p>
-                </section>
-
-                <section id="escalation-system">
-                    <h2>Escalation System</h2>
-                    <ol>
-                        <li>When a CSO is triggered, create an active CSO record and list the affected services.</li>
-                        <li>Create an affected-service record at the first escalation layer for each impacted service.</li>
-                        <li>Send a notification event for the first layer, then record the notification start time and increment the attempt count.</li>
-                        <li>Run a scheduler every minute. If the current layer has not been acknowledged and its escalation time has been reached, create a record for the next layer, mark the previous layer as no longer current, and notify the new layer.</li>
-                        <li>Continue through the layers. At the final layer, retry according to policy or route the incident for manual intervention.</li>
-                    </ol>
-                    <p>Fetch on-call snapshots for each affected service and layer, including the on-call owner and shift end time, so the escalation engine can continue without depending on live scheduling-service availability.</p>
-                </section>
-
-                <section id="reliability">
-                    <h2>Reliability Considerations</h2>
-                    <h3>Atomicity</h3>
-                    <p>Notification publishing and updating the corresponding layer record must stay consistent. Use a transactional outbox so the notification event and its state change can be reliably coordinated and retried.</p>
-                    <h3>Idempotency</h3>
-                    <p>Notification publishing must be safe to retry. Repeated requests with the same idempotency key should return the existing notification ID rather than creating duplicate notifications.</p>
-                </section>
             </main>
         </div>
         <footer></footer>
